@@ -1,0 +1,37 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: loadforge
+      POSTGRES_PASSWORD: loadforge
+      POSTGRES_DB: loadforge
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ../backend/db/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://loadforge:loadforge@postgres:5432/loadforge
+      REDIS_URL: redis://redis:6379
+      USE_CACHE: "false"
+      USE_INDEXES: "false"
+    depends_on:
+      - postgres
+      - redis
+
+volumes:
+  pg_data:
