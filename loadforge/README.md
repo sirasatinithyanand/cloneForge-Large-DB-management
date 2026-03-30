@@ -161,10 +161,17 @@ Every response includes a `query_time_ms` field so you can see the database time
 
 ## What I learned
 
-The `/report` endpoint does a JOIN between 125k transactions and 100k events grouped by day — without an index, Postgres scans every row for every request. Under load, connections queue up and timeouts cascade.
+**Multi-tenancy and why indexes matter more than you think**
+When one database serves multiple customers, every query filters by `tenant_id`. Without an index, Postgres scans all 125k rows just to find the ~25k belonging to one tenant. A composite index on `(tenant_id, created_at)` works like a phonebook sorted first by tenant then by date — Postgres jumps directly to the right rows instead of reading the whole table.
 
-Adding a composite index on `(tenant_id, created_at)` gives Postgres a way to jump directly to the rows it needs. Redis caching means repeat requests in the same 30-60s window never touch the database at all.
+**Cache-aside pattern with Redis**
+The app checks Redis before hitting the database. On a cache miss it queries Postgres, stores the result in Redis with a TTL (30-60s), and returns it. On a cache hit it skips the database entirely. This is why `/dashboard` went from 1600ms to 3ms — once the cache is warm, 90%+ of requests never touch Postgres. The tradeoff is stale data within the TTL window, which is acceptable for dashboard-style reads.
 
-The optimizer module (`backend/services/optimizer.py`) logs a `[SLOW QUERY]` warning with an index suggestion whenever any query exceeds 500ms — a simple version of what real observability tools do.
+**Cursor-based pagination vs OFFSET**
+`LIMIT 20 OFFSET 1000` forces Postgres to count and skip 1000 rows on every request — gets slower as you go deeper into the table. Cursor pagination (`WHERE id > :last_seen_id LIMIT 20`) lets Postgres jump straight to where you left off using the primary key index. Same result, but O(1) instead of O(n).
 
-Cursor-based pagination (`WHERE id > :cursor`) also matters at scale — OFFSET forces Postgres to count through skipped rows, which gets expensive fast on large tables.
+**What load testing actually reveals**
+Testing one request at a time hides a class of bugs that only appear under concurrency — connection pool exhaustion, queries queuing behind each other, timeouts cascading. Locust showed the `/report` endpoint failing 98% of the time under 100 users even though it worked fine in isolation. The median response time was 28 seconds, not because the query was slow once, but because 100 slow queries were running simultaneously and blocking each other.
+
+**Observability at the query level**
+Every API response includes `query_time_ms` so you can see database time directly in the response. The optimizer module logs a `[SLOW QUERY]` warning with an index suggestion when any query exceeds 500ms. This is a minimal version of what APM tools like Datadog do — instrument first, then you have data to act on.
